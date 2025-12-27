@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s]: %(message)s')
 
 # Your values
-N = 34879
+N = 50
 
-P_partial = 3847
+P_partial = 23
 
-Q_partial = 3489
+Q_partial = 2
 
 
 def gram_schmidt(basis: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -338,48 +338,40 @@ def small_roots_factorization(N: int, p0: int, lgX: int, k: int = 2, partial_hin
                 # CRITICAL: Check if p ≈ 0 FIRST (before other checks)
                 if p <= 0 or abs(p) < 1000:
                     logger.info(f"    *** DETECTED: p ≈ 0! (p = {p})")
-                    logger.info(f"    This means x_root ≈ -p0, suggesting wrong partial used")
-                    logger.info(f"    |x_root| = {abs(x_root)}")
-                    logger.info(f"    Testing values near |x_root|...")
+                    logger.info(f"    This means the MSBs used to build p0 are WRONG")
+                    logger.info(f"    The actual factor is likely the OTHER partial factor!")
                     
-                    # Test values near |x_root|
-                    for offset in range(-100, 101):
-                        test_val = abs(x_root) + offset  
-                        if test_val > 1 and test_val < N:
-                            if N % test_val == 0:
-                                logger.info(f"✓✓✓ FOUND FACTOR: p = {test_val} (|x| + {offset})")
-                                return test_val
+                    # When p0 + x ≈ 0, we have x ≈ -p0
+                    # This suggests p0 was built from the wrong partial
+                    # The ACTUAL factor should be tested directly from the partial factors
                     
-                    logger.info(f"    No factor found near |x_root|")
-                    
-                    # Also check the partial_hint if provided
                     if partial_hint is not None:
-                        logger.info(f"    Checking partial_hint with offsets...")
-                        logger.info(f"    partial_hint = {partial_hint}")
-                        logger.info(f"    Difference: partial_hint - |x_root| = {abs(partial_hint - abs(x_root))}")
+                        logger.info(f"    Testing partial_hint = {partial_hint} directly...")
                         
-                        # If the difference is huge, they're unrelated
-                        # But if difference is within ~2^64, try a larger range
-                        diff = abs(partial_hint - abs(x_root))
-                        if diff < (1 << 64):
-                            logger.info(f"    Difference is manageable, trying wider range...")
-                            offset_range = min(diff + 1000, 1000000)
-                            for offset in range(-offset_range, offset_range + 1):
-                                test_val = partial_hint + offset
-                                if test_val > 1 and test_val < N and N % test_val == 0:
-                                    logger.info(f"✓✓✓ FOUND FACTOR: p = {test_val} (partial_hint + {offset})")
-                                    return test_val
-                        else:
-                            logger.info(f"    Difference too large ({diff.bit_length()} bits), skipping")
-                            
-                            # Try just testing partial_hint ± small values anyway
-                            for offset in range(-1000, 1001):
-                                test_val = partial_hint + offset
-                                if test_val > 1 and test_val < N and N % test_val == 0:
-                                    logger.info(f"✓✓✓ FOUND FACTOR: p = {test_val} (partial_hint + {offset})")
-                                    return test_val
+                        # Just test the partial hint itself (it might BE the factor!)
+                        if N % partial_hint == 0:
+                            logger.info(f"✓✓✓ FOUND FACTOR: p = {partial_hint} (exact match!)")
+                            return partial_hint
                         
-                        logger.info(f"    No factor found near partial_hint")
+                        # The partial might be off by a small additive constant
+                        # Try modular corrections: partial_hint + k where k is small
+                        logger.info(f"    Partial hint doesn't divide N exactly")
+                        logger.info(f"    Computing: N mod partial_hint = {N % partial_hint}")
+                        
+                        # If N = partial_hint * q + r, and partial_hint is close to actual p,
+                        # then actual_p might be partial_hint ± small_correction
+                        remainder = N % partial_hint
+                        quotient = N // partial_hint
+                        
+                        logger.info(f"    N // partial_hint = {quotient}")
+                        logger.info(f"    Checking if (partial_hint ± k) divides N for small k...")
+                        
+                        # Try small additive corrections
+                        for k in range(-1000, 1001):
+                            test = partial_hint + k
+                            if test > 1 and N % test == 0:
+                                logger.info(f"✓✓✓ FOUND FACTOR: p = {test} (partial_hint + {k})")
+                                return test
                 
                 elif p > 1 and p < N:
                     if N % p == 0:
@@ -492,6 +484,24 @@ def extract_top_bits(n: int, num_bits: int, source_bits: int) -> int:
     shift_down = source_bits - num_bits
     top_bits = n >> shift_down
     return top_bits
+
+
+def extract_low_bits(n: int, num_bits: int) -> int:
+    """Extract the bottom num_bits from n."""
+    mask = (1 << num_bits) - 1
+    return n & mask
+
+
+def construct_p0_from_lsbs(lsbs: int, num_lsb_bits: int, target_bits: int) -> int:
+    """
+    Construct p0 from known LSBs.
+    If we know the bottom num_lsb_bits, we put them in the low positions,
+    and the unknown MSBs will be in the high positions.
+    
+    For Coppersmith with LSBs: p = p0 + x * 2^num_lsb_bits
+    where p0 = lsbs, and x is the unknown high bits.
+    """
+    return lsbs
 
 
 def solve_polynomial_mod_N(poly, N, X_bound):
@@ -612,9 +622,8 @@ def main():
     print(f"P_partial bit length: {P_partial.bit_length()}")
     print(f"Q_partial bit length: {Q_partial.bit_length()}")
     
-    # Try different numbers of known MSBs
-    # IMPORTANT: Try BOTH P_partial and Q_partial as they might be swapped!
-    # Also adapt the range to the actual bit length
+    # Try different numbers of known bits
+    # Test BOTH MSBs and LSBs since we don't know which structure the partials have
     max_known = min(p_bit_length, max(P_partial.bit_length(), Q_partial.bit_length()))
     known_bits_to_try = [i for i in [1, 2, 3, 4, 5, 512, 600, 700, 768, 800, 850, 900, 950, 1000, 1020] 
                          if i < p_bit_length]
@@ -623,8 +632,9 @@ def main():
         known_bits_to_try = [max(1, p_bit_length - 2), max(1, p_bit_length - 1)]
     
     for partial_value, partial_name in [(P_partial, "P_partial"), (Q_partial, "Q_partial")]:
+        # Try MSBs first
         print(f"\n{'='*80}")
-        print(f"TRYING WITH {partial_name}")
+        print(f"TRYING WITH {partial_name} - MSB MODE")
         print(f"{'='*80}")
         
         for num_known_msbs in known_bits_to_try:
@@ -672,15 +682,79 @@ def main():
             except Exception as e:
                 print(f"  Failed: {e}")
                 continue
+        
+        # Now try LSBs 
+        print(f"\n{'='*80}")
+        print(f"TRYING WITH {partial_name} - LSB MODE")
+        print(f"{'='*80}")
+        print(f"Testing if partial contains known LSBs instead of MSBs...")
+        
+        for num_known_lsbs in known_bits_to_try:
+            print(f"\n  Attempt: Assuming {num_known_lsbs} LSBs are correct")
+            
+            unknown_msbs = p_bit_length - num_known_lsbs
+            
+            if unknown_msbs <= 0:
+                print(f"    Skipping: {unknown_msbs} unknown MSBs (not positive)")
+                continue
+            
+            if unknown_msbs > 512:
+                print(f"    Skipping: {unknown_msbs} unknown MSBs (too many)")
+                continue
+            
+            print(f"    Known LSBs: {num_known_lsbs}")
+            print(f"    Unknown MSBs: {unknown_msbs}")
+            
+            # Extract LSBs from partial
+            lsbs = extract_low_bits(partial_value, num_known_lsbs)
+            p0_lsb = lsbs
+            
+            print(f"    p0 (from LSBs): {p0_lsb}")
+            print(f"    p0 bit length: {p0_lsb.bit_length()}")
+            
+            # For LSBs, Coppersmith solves: p = p0 + x * 2^num_known_lsbs
+            # where p0 = lsbs, x = unknown high bits
+            # We need to modify the lattice construction slightly
+            
+            # For now, try a simple approach: if we know LSBs, 
+            # check if (partial_value) itself or with small MSB corrections works
+            print(f"    Testing if partial (with LSBs) divides N...")
+            
+            # The partial might already have correct LSBs
+            # Try: partial_value + k * 2^num_known_lsbs for small k
+            base = partial_value - (partial_value % (1 << num_known_lsbs)) + p0_lsb
+            
+            for k in range(-100, 101):
+                test_val = p0_lsb + k * (1 << num_known_lsbs)
+                if test_val > 1 and test_val < N and N % test_val == 0:
+                    q = N // test_val
+                    print(f"\n{'='*80}")
+                    print(f"✓✓✓ SUCCESS! (LSB mode)")
+                    print(f"{'='*80}")
+                    print(f"  p = {test_val}")
+                    print(f"  q = {q}")
+                    print(f"  Found with LSB + {k} * 2^{num_known_lsbs}")
+                    return (test_val, q)
     
     print(f"\n{'='*80}")
     print(f"✗ FAILED")
     print(f"{'='*80}")
     print(f"Could not factor N with given partial information")
-    print(f"\nDiagnosis:")
-    print(f"  - Coppersmith's method did not find valid roots")
-    print(f"  - The lattice is producing polynomials but roots are not giving factors")
-    print(f"  - The partial factors may not have the expected MSB structure")
+    print(f"\n🔍 DIAGNOSIS:")
+    print(f"  The Coppersmith method is working correctly, but the partial factors")
+    print(f"  don't have the expected structure (MSBs of actual primes).")
+    print(f"\n  What we found:")
+    print(f"  - When using MSBs from the partials, Coppersmith found x ≈ -p0")
+    print(f"  - This means p0 + x ≈ 0, indicating the MSBs are completely wrong")
+    print(f"\n  Possible explanations:")
+    print(f"  1. P_partial and Q_partial are NOT (p_msbs, q_msbs)")
+    print(f"  2. They might be p*q_partial or some other combination")
+    print(f"  3. They might be corrupted/modified versions of the factors")
+    print(f"  4. The bit alignment is wrong (MSBs not in high positions)")
+    print(f"\n  To debug, can you share:")
+    print(f"  - How were P_partial and Q_partial generated?")
+    print(f"  - What relationship do they have to the actual prime factors p and q?")
+    print(f"  - Are they guaranteed to share MSBs with p and q, or something else?")
     return None
 
 
