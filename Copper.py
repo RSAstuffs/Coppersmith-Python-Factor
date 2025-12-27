@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s]: %(message)s')
 
 # Your values
-N = 50
+N = 34879
 
-P_partial = 20
+P_partial = 3847
 
-Q_partial = 3
+Q_partial = 3489
 
 
 def gram_schmidt(basis: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -92,7 +92,7 @@ def lll_reduce(basis: np.ndarray, delta: float = 0.75, return_float: bool = Fals
     return result
 
 
-def small_roots_factorization(N: int, p0: int, lgX: int, k: int = 2) -> Optional[int]:
+def small_roots_factorization(N: int, p0: int, lgX: int, k: int = 2, partial_hint: Optional[int] = None) -> Optional[int]:
     """
     Coppersmith's method for factorization with known MSBs.
     
@@ -308,8 +308,22 @@ def small_roots_factorization(N: int, p0: int, lgX: int, k: int = 2) -> Optional
             
             logger.info(f"    Polynomial degree: {len(poly)-1}, first 3 coeffs: {poly[:min(3, len(poly))]}")
             
-            # Try to solve the polynomial
-            # For small degree, we can try different methods
+            # Try advanced polynomial solving with Diophantine equations
+            try:
+                logger.info(f"    Attempting Diophantine/modular equation solving...")
+                candidates = solve_polynomial_mod_N(poly.copy(), N, X)
+                
+                if candidates:
+                    logger.info(f"    Found {len(candidates)} candidates from Diophantine solver")
+                    for x_cand in candidates:
+                        p_test = p0 + x_cand
+                        if p_test > 1 and p_test < N and N % p_test == 0:
+                            logger.info(f"✓✓✓ FOUND FACTOR: p = {p_test} (via Diophantine, x = {x_cand})")
+                            return p_test
+            except Exception as e:
+                logger.warning(f"    Diophantine solver error: {e}")
+            
+            # Try to solve the polynomial using standard methods
             
             if len(poly) == 2 and poly[1] != 0:
                 # Linear: a*x + b = 0 => x = -b/a
@@ -319,22 +333,58 @@ def small_roots_factorization(N: int, p0: int, lgX: int, k: int = 2) -> Optional
                 
                 # Try this x value
                 p = p0 + x_root
-                logger.info(f"    Testing p = p0 + x...")
-                logger.info(f"    p bit length: {p.bit_length()}")
+                logger.info(f"    Testing p = p0 + x = {p}")
                 
-                if p > 1 and p < N:
+                # CRITICAL: Check if p ≈ 0 FIRST (before other checks)
+                if p <= 0 or abs(p) < 1000:
+                    logger.info(f"    *** DETECTED: p ≈ 0! (p = {p})")
+                    logger.info(f"    This means x_root ≈ -p0, suggesting wrong partial used")
+                    logger.info(f"    |x_root| = {abs(x_root)}")
+                    logger.info(f"    Testing values near |x_root|...")
+                    
+                    # Test values near |x_root|
+                    for offset in range(-100, 101):
+                        test_val = abs(x_root) + offset  
+                        if test_val > 1 and test_val < N:
+                            if N % test_val == 0:
+                                logger.info(f"✓✓✓ FOUND FACTOR: p = {test_val} (|x| + {offset})")
+                                return test_val
+                    
+                    logger.info(f"    No factor found near |x_root|")
+                    
+                    # Also check the partial_hint if provided
+                    if partial_hint is not None:
+                        logger.info(f"    Checking partial_hint with offsets...")
+                        logger.info(f"    partial_hint = {partial_hint}")
+                        logger.info(f"    Difference: partial_hint - |x_root| = {abs(partial_hint - abs(x_root))}")
+                        
+                        # If the difference is huge, they're unrelated
+                        # But if difference is within ~2^64, try a larger range
+                        diff = abs(partial_hint - abs(x_root))
+                        if diff < (1 << 64):
+                            logger.info(f"    Difference is manageable, trying wider range...")
+                            offset_range = min(diff + 1000, 1000000)
+                            for offset in range(-offset_range, offset_range + 1):
+                                test_val = partial_hint + offset
+                                if test_val > 1 and test_val < N and N % test_val == 0:
+                                    logger.info(f"✓✓✓ FOUND FACTOR: p = {test_val} (partial_hint + {offset})")
+                                    return test_val
+                        else:
+                            logger.info(f"    Difference too large ({diff.bit_length()} bits), skipping")
+                            
+                            # Try just testing partial_hint ± small values anyway
+                            for offset in range(-1000, 1001):
+                                test_val = partial_hint + offset
+                                if test_val > 1 and test_val < N and N % test_val == 0:
+                                    logger.info(f"✓✓✓ FOUND FACTOR: p = {test_val} (partial_hint + {offset})")
+                                    return test_val
+                        
+                        logger.info(f"    No factor found near partial_hint")
+                
+                elif p > 1 and p < N:
                     if N % p == 0:
                         logger.info(f"✓✓✓ FOUND FACTOR: p = {p}")
                         return p
-                    else:
-                        logger.info(f"    p does not divide N")
-                        logger.info(f"    N % p = {N % p}")
-                
-                # Also try negative
-                p2 = p0 - abs(x_root)
-                if p2 > 1 and p2 < N and N % p2 == 0:
-                    logger.info(f"✓✓✓ FOUND FACTOR: p = {p2}")
-                    return p2
             
             elif len(poly) == 3 and poly[2] != 0:
                 # Quadratic: ax^2 + bx + c = 0
@@ -444,6 +494,101 @@ def extract_top_bits(n: int, num_bits: int, source_bits: int) -> int:
     return top_bits
 
 
+def solve_polynomial_mod_N(poly, N, X_bound):
+    """
+    Solve polynomial equation using algebra, not search.
+    """
+    def egcd(a, b):
+        """Extended Euclidean Algorithm."""
+        if b == 0:
+            return a, 1, 0
+        g, x1, y1 = egcd(b, a % b)
+        return g, y1, x1 - (a // b) * y1
+    
+    solutions = []
+    
+    # Remove trailing zeros
+    while len(poly) > 1 and poly[-1] == 0:
+        poly.pop()
+    
+    if len(poly) <= 1:
+        return solutions
+    
+    # Linear: ax + b ≡ 0 (mod N)
+    # This means: ax ≡ -b (mod N)
+    # Solution exists iff gcd(a, N) | b
+    if len(poly) == 2:
+        a, b = poly[1], poly[0]
+        
+        # Use Extended Euclidean Algorithm
+        g, x, y = egcd(a, N)
+        
+        # Check if solution exists
+        if (-b) % g != 0:
+            return solutions  # No solution
+        
+        # Particular solution
+        x0 = (x * (-b // g)) % N
+        
+        # All solutions: x = x0 + k*(N/g) for any integer k
+        # We want |x| < X_bound
+        step = N // g
+        
+        # Find the k that minimizes |x|
+        # x0 + k*step should be close to 0
+        # So k ≈ -x0/step
+        k_center = -x0 // step
+        
+        # Check a few k values around k_center
+        for k in [k_center - 1, k_center, k_center + 1]:
+            x_sol = x0 + k * step
+            
+            # Also consider x_sol - N (since we work mod N)
+            for candidate in [x_sol, x_sol - N, x_sol + N]:
+                if abs(candidate) < X_bound:
+                    solutions.append(candidate)
+                    break  # Only add one solution per k
+    
+    # Quadratic: ax^2 + bx + c ≡ 0 (mod N)
+    # For large N this is hard, but if disc is perfect square we can solve over Z
+    elif len(poly) == 3:
+        a, b, c = poly[2], poly[1], poly[0]
+        if a == 0:
+            return solutions
+        
+        try:
+            disc = b*b - 4*a*c
+            if disc < 0:
+                return solutions
+            
+            # Newton's method for integer square root
+            def isqrt(n):
+                if n == 0:
+                    return 0
+                x = n
+                y = (x + 1) // 2
+                while y < x:
+                    x = y
+                    y = (x + n // x) // 2
+                return x
+            
+            sqrt_d = isqrt(disc)
+            
+            # Only proceed if perfect square
+            if sqrt_d * sqrt_d == disc:
+                # Two solutions: x = (-b ± sqrt_d) / (2a)
+                for sign in [1, -1]:
+                    numerator = -b + sign * sqrt_d
+                    if numerator % (2*a) == 0:
+                        x_sol = numerator // (2*a)
+                        if abs(x_sol) < X_bound:
+                            solutions.append(x_sol)
+        except:
+            pass
+    
+    return solutions
+
+
 def main():
     print("=" * 80)
     print("STANDALONE COPPERSMITH ATTACK FROM PARTIAL FACTORS")
@@ -511,7 +656,7 @@ def main():
                 continue
             
             try:
-                p = small_roots_factorization(N, p_known_msbs, unknown_bits, k=2)
+                p = small_roots_factorization(N, p_known_msbs, unknown_bits, k=2, partial_hint=partial_value)
                 
                 if p is not None and p > 1 and N % p == 0:
                     q = N // p
