@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s]: %(message)s')
 
 # Your values
-N = 50
+N = 2
 
-P_partial = 23
+P_partial = 1
 
-Q_partial = 2
+Q_partial = 1
 
 
 def gram_schmidt(basis: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -482,6 +482,9 @@ def small_roots_factorization(N: int, p0: int, lgX: int, k: int = 2, partial_hin
 def extract_top_bits(n: int, num_bits: int, source_bits: int) -> int:
     """Extract the top num_bits from n."""
     shift_down = source_bits - num_bits
+    if shift_down < 0:
+        # Can't extract more bits than exist, so shift what we have to high positions
+        return n << (-shift_down)
     top_bits = n >> shift_down
     return top_bits
 
